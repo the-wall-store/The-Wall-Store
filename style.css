@@ -507,4 +507,86 @@ a{ color:inherit; }
   .orders-board{ grid-template-columns:1fr; }
   .modal.wide{ padding:22px 16px 20px; }
   #detailContent{ grid-template-columns:1fr !important; }
+  .nav-actions{ gap:8px; }
+  .nav-actions .btn{ padding:8px 12px; font-size:11px; }
+  .user-chip{ display:none; }
+  .store-tabs{ margin:0 -16px 20px; padding:0 16px 2px; }
+  .size-price-row{ flex-wrap:wrap; }
+  .size-price-row .size-price-input{ flex:1 1 100%; }
+  .admin-panel{ gap:18px; }
+  .footer{ padding:24px 16px; }
 }
+
+/* ---------- Store tabs (Chrome-tab style browsing) ---------- */
+.store-tabs{
+  display:flex; gap:4px; overflow-x:auto;
+  border-bottom:2px solid var(--ink);
+  margin-bottom:26px;
+}
+.store-tab{
+  font-family:var(--font-mono); font-size:12px; text-transform:uppercase; letter-spacing:1px;
+  padding:10px 16px; background:none; border:none; border-bottom:3px solid transparent; margin-bottom:-2px;
+  color:var(--grey); white-space:nowrap; flex:none;
+}
+.store-tab.active{ color:var(--ink); border-bottom-color:var(--riso-red); }
+
+/* Tab badge (unseen-orders count, admin) */
+.tab-badge{
+  background:var(--riso-red); color:#fff; font-family:var(--font-mono); font-size:10px;
+  border-radius:999px; padding:2px 7px; margin-left:6px; display:inline-block;
+}
+
+/* Product-type toggle (poster / collection) */
+.type-toggle{ display:flex; gap:8px; }
+.type-pill{
+  font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:1px;
+  padding:8px 14px; border:2px solid var(--ink); border-radius:999px; cursor:pointer;
+  background:var(--paper-card); user-select:none;
+}
+.type-pill input{ display:none; }
+.type-pill.on{ background:var(--riso-blue); border-color:var(--riso-blue); color:#fff; }
+
+/* Per-size pricing rows in admin forms */
+.size-price-list{ flex-direction:column; align-items:stretch; }
+.size-price-row{ display:flex; align-items:center; gap:10px; }
+.size-price-row .checkbox-pill{ flex:none; min-width:120px; text-align:center; }
+.size-price-input{
+  flex:1; padding:8px 10px; border:2px solid var(--ink); background:var(--paper);
+  font-family:var(--font-mono); font-size:12px;
+}
+
+/* UPI text row on the checkout screen */
+.upi-text-row{
+  font-family:var(--font-mono); font-size:12px; text-align:left;
+  border:1px dashed var(--grey); background:var(--paper);
+  padding:10px 12px; margin-top:12px; line-height:1.8;
+}
+.upi-text-label{ color:var(--grey); }
+
+/* Saved-shipping confirm screen */
+.order-shipping{
+  font-family:var(--font-mono); font-size:12px; color:var(--ink);
+  background:var(--paper); border:1px dashed var(--grey);
+  padding:10px 12px; line-height:1.7;
+}
+
+/* Help / Contact page */
+.help-content{
+  font-family:var(--font-body); font-size:14px; line-height:1.7; color:var(--ink);
+  white-space:pre-wrap; margin-top:18px;
+}
+.contact-card-row{ display:flex; flex-direction:column; gap:10px; margin-top:6px; }
+.contact-card{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  border:2px solid var(--ink); padding:14px 16px; background:var(--paper-card);
+  text-decoration:none; color:var(--ink);
+}
+.contact-card:hover{ background:var(--ink); color:var(--paper); }
+.contact-card .contact-label{ font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--grey); }
+.contact-card:hover .contact-label{ color:var(--paper); opacity:.8; }
+.contact-card .contact-value{ font-family:var(--font-display); font-size:14px; }
+
+/* Admin contacts editor */
+.contact-edit-row{ display:flex; gap:8px; margin-bottom:8px; align-items:center; }
+.contact-edit-row input{ flex:1; padding:9px 10px; border:2px solid var(--ink); background:var(--paper); font-family:var(--font-mono); font-size:12px; }
+.contact-edit-row button{ flex:none; }
