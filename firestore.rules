@@ -1,6 +1,6 @@
 rules_version = '2';
 
-// Keep this OWNER_EMAILS list in sync with config.js.
+// Keep this OWNER_EMAILS list in sync with config.js and storage.rules.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -10,61 +10,54 @@ service cloud.firestore {
           "shivi260121@gmail.com"
         ];
     }
+    function isSignedIn() {
+      return request.auth != null;
+    }
 
-    // Anyone (even signed-out visitors) can browse products.
-    // Only the owner can add, edit, or delete them.
-    // Note: a product doc includes a "keywords" field meant for admin-only
-    // search use. Firestore can't hide individual fields on a publicly
-    // readable document — true field-level privacy would need a paid
-    // Cloud Functions backend. This field just isn't rendered anywhere in
-    // the storefront UI.
+    // Anyone can browse products (posters + collections). Only the owner
+    // can add, edit, or delete them.
     match /products/{productId} {
       allow read: if true;
       allow create, update, delete: if isOwner();
     }
 
-    // Admin-defined categories shown on the store page. Public read so the
-    // store can group products by section; only the owner can manage them.
+    // Section tabs (e.g. "Music", "Movies"). Everyone reads them to build
+    // the store tabs; only the owner manages them.
     match /sections/{sectionId} {
       allow read: if true;
       allow create, update, delete: if isOwner();
     }
 
-    // Global size options (label + optional scale-reference image), shared
-    // across all posters. Public read so the store can show them; only the
-    // owner can manage them.
+    // Sizes + their scale-reference images. Same pattern.
     match /sizes/{sizeId} {
       allow read: if true;
       allow create, update, delete: if isOwner();
     }
 
-    // A signed-in customer can create an order for themselves and read
-    // their own orders. Only the owner can read all orders, or change
-    // an order's status (mark paid / fulfilled / rejected).
+    // Orders are now only ever created once — after the customer taps
+    // "I've paid" — and the whole document (items, total, shipping,
+    // customerConfirmedPaid: true, seenByAdmin: false) is written in that
+    // single create call. Customers never patch a doc afterwards, so only
+    // the owner needs update access (status changes, seenByAdmin flips).
     match /orders/{orderId} {
-      allow create: if request.auth != null
-                    && request.resource.data.userId == request.auth.uid;
-      allow read: if request.auth != null
-                  && (isOwner() || resource.data.userId == request.auth.uid);
-      allow update: if isOwner()
-                    || (request.auth != null
-                        && resource.data.userId == request.auth.uid
-                        // customers may only flip this one field themselves
-                        && request.resource.data.diff(resource.data).affectedKeys()
-                             .hasOnly(["customerConfirmedPaid"]));
+      allow create: if isSignedIn()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.customerConfirmedPaid == true;
+      allow read: if isOwner()
+                  || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow update: if isOwner();
       allow delete: if isOwner();
     }
 
     // Each signed-in customer can read/write only their own saved shipping
-    // profile (name/phone/address/pincode — used to prefill checkout next
-    // time they order).
+    // profile (used to prefill/confirm checkout next time).
     match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
 
-    // Payment settings (UPI id / payee name / custom QR image). Everyone
-    // needs to read this so the checkout screen can show the QR code —
-    // only the owner can change it from Admin → Payment.
+    // Payment settings (UPI id / payee name / QR image) and the Help page
+    // (content + contacts): everyone can read so the store works for
+    // signed-out visitors too; only the owner can edit either.
     match /settings/{docId} {
       allow read: if true;
       allow write: if isOwner();
