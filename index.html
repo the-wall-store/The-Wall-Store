@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>The Wall Store</title>
+<title>The Wall Store — Posters</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23FF4C3B%22/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -45,20 +45,25 @@
       <p class="empty-note hidden" id="searchEmptyNote">No posters match that search.</p>
     </div>
 
-    <!-- Normal browsing: bestsellers + admin-defined sections -->
+    <!-- Normal browsing -->
     <div id="browseWrap">
       <div id="bestsellerBlock" class="hidden">
         <p class="section-label">Bestsellers</p>
         <div class="grid" id="bestsellerGrid"></div>
       </div>
 
-      <div id="sectionsContainer"></div>
+      <div class="store-tabs" id="storeTabs"></div>
+      <div class="grid" id="activeTabGrid"></div>
+      <p class="empty-note hidden" id="activeTabEmptyNote">Nothing here yet.</p>
 
       <p class="empty-note hidden" id="emptyNote">No posters up yet — check back soon.</p>
     </div>
   </div>
 
-  <footer class="footer">The Wall Store</footer>
+  <footer class="footer">
+    The Wall Store
+    <button class="btn-plain" id="footerHelpBtn" type="button" style="margin-left:8px;">Need help?</button>
+  </footer>
 </main>
 
 <!-- ===================== ADMIN VIEW ===================== -->
@@ -68,16 +73,24 @@
       <button class="admin-tab active" data-tab="products">Products</button>
       <button class="admin-tab" data-tab="sections">Sections</button>
       <button class="admin-tab" data-tab="sizes">Sizes</button>
-      <button class="admin-tab" data-tab="orders">Orders</button>
+      <button class="admin-tab" data-tab="orders">Orders <span class="tab-badge hidden" id="ordersBadge">0</span></button>
       <button class="admin-tab" data-tab="settings">Payment</button>
+      <button class="admin-tab" data-tab="help">Help page</button>
     </div>
 
     <!-- PRODUCTS TAB -->
     <div id="adminProductsTab">
       <div class="admin-panel">
         <div class="panel-card">
-          <h3>Add a poster</h3>
+          <h3>Add a product</h3>
           <form id="addProductForm">
+            <div class="field">
+              <label>Product type</label>
+              <div class="type-toggle" id="addTypeToggle">
+                <label class="type-pill on"><input type="radio" name="productType" value="poster" checked><span>Poster</span></label>
+                <label class="type-pill"><input type="radio" name="productType" value="collection"><span>Collection</span></label>
+              </div>
+            </div>
             <div class="field">
               <label>Image</label>
               <div class="dropzone" id="dropzone">
@@ -92,8 +105,8 @@
               <input type="text" id="productName" required placeholder="e.g. Midnight Skyline">
             </div>
             <div class="field">
-              <label>Price (₹)</label>
-              <input type="number" id="productPrice" required min="0" step="1" placeholder="499">
+              <label>Base price (₹) <span class="admin-only-tag">used only if no sizes are picked below</span></label>
+              <input type="number" id="productPrice" min="0" step="1" placeholder="499">
             </div>
             <div class="field">
               <label>Details (optional)</label>
@@ -108,8 +121,8 @@
               <div class="checkbox-list" id="productSectionsList"></div>
             </div>
             <div class="field">
-              <label>Available sizes</label>
-              <div class="checkbox-list" id="productSizesList"></div>
+              <label>Available sizes &amp; their prices</label>
+              <div class="checkbox-list size-price-list" id="productSizesList"></div>
             </div>
             <div class="form-error hidden" id="addProductError"></div>
             <button type="submit" class="btn btn-solid" id="addProductBtn" style="width:100%;">Add product</button>
@@ -117,16 +130,16 @@
         </div>
 
         <div class="panel-card">
-          <h3>Current posters</h3>
+          <h3>Current products</h3>
           <div style="overflow-x:auto;">
             <table class="admin-table">
               <thead>
-                <tr><th></th><th>Name</th><th>Price</th><th>Tags</th><th></th></tr>
+                <tr><th></th><th>Name</th><th>Type</th><th>Price</th><th>Tags</th><th></th></tr>
               </thead>
               <tbody id="adminProductRows"></tbody>
             </table>
           </div>
-          <p class="empty-note hidden" id="adminEmptyNote">Nothing listed yet — add your first poster on the left.</p>
+          <p class="empty-note hidden" id="adminEmptyNote">Nothing listed yet — add your first product on the left.</p>
         </div>
       </div>
     </div>
@@ -136,7 +149,7 @@
       <div class="admin-panel">
         <div class="panel-card">
           <h3>Add a section</h3>
-          <p class="sub" style="margin-top:-8px;">e.g. "Music", "Movies", "Minimalist" — however you want to group posters.</p>
+          <p class="sub" style="margin-top:-8px;">e.g. "Music", "Movies", "Minimalist" — however you want to group products. Shows up as its own tab on the store page.</p>
           <form id="addSectionForm">
             <div class="field">
               <label>Section name</label>
@@ -149,7 +162,7 @@
         <div class="panel-card">
           <h3>Current sections</h3>
           <div id="sectionsListWrap"></div>
-          <p class="empty-note hidden" id="sectionsEmptyNote">No sections yet — add one on the left, then assign posters to it from the Products tab.</p>
+          <p class="empty-note hidden" id="sectionsEmptyNote">No sections yet — add one on the left, then assign products to it from the Products tab.</p>
         </div>
       </div>
     </div>
@@ -159,7 +172,7 @@
       <div class="admin-panel">
         <div class="panel-card">
           <h3>Add a size</h3>
-          <p class="sub" style="margin-top:-8px;">One reference image per size (a blank poster shown against a real object for scale) — reused across every poster you offer in that size.</p>
+          <p class="sub" style="margin-top:-8px;">One reference image per size (a blank poster shown against a real object for scale) — reused across every product you offer in that size.</p>
           <form id="addSizeForm">
             <div class="field">
               <label>Size label</label>
@@ -181,7 +194,7 @@
         <div class="panel-card">
           <h3>Current sizes</h3>
           <div id="sizesListWrap"></div>
-          <p class="empty-note hidden" id="sizesEmptyNote">No sizes yet — add one on the left, then pick it for posters from the Products tab.</p>
+          <p class="empty-note hidden" id="sizesEmptyNote">No sizes yet — add one on the left, then set a price for it on any product from the Products tab.</p>
         </div>
       </div>
     </div>
@@ -192,7 +205,7 @@
       <p class="empty-note hidden" id="ordersEmptyNote">No orders yet.</p>
     </div>
 
-    <!-- SETTINGS TAB -->
+    <!-- SETTINGS (PAYMENT) TAB -->
     <div id="adminSettingsTab" class="hidden">
       <div class="panel-card" style="max-width:460px;">
         <h3>Payment settings</h3>
@@ -214,10 +227,31 @@
               </div>
               <input type="file" id="qrImageInput" accept="image/*" class="hidden">
             </div>
-            <p class="form-note">If you upload an image here, it's shown instead of the auto-generated QR. Clear the UPI ID field and re-save to fall back to auto-generated.</p>
+            <p class="form-note">If you upload an image here, it's shown instead of the auto-generated QR. Your UPI ID and payee name below are always shown as text too, either way.</p>
           </div>
           <div class="form-error hidden" id="settingsError"></div>
           <button type="submit" class="btn btn-solid" id="settingsSaveBtn" style="width:100%;">Save payment settings</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- HELP PAGE TAB -->
+    <div id="adminHelpTab" class="hidden">
+      <div class="panel-card" style="max-width:560px;">
+        <h3>Help page</h3>
+        <p class="sub" style="margin-top:-8px;">What customers see when they tap "Need help?" — write FAQs, policies, whatever's useful, and list ways to reach you.</p>
+        <form id="helpSettingsForm">
+          <div class="field">
+            <label>Contacts</label>
+            <div id="contactsEditor"></div>
+            <button type="button" class="btn-plain" id="addContactRowBtn">+ Add contact</button>
+          </div>
+          <div class="field">
+            <label>Help content</label>
+            <textarea id="helpContent" style="min-height:180px;" placeholder="Shipping times, return policy, sizing help, anything customers might ask..."></textarea>
+          </div>
+          <div class="form-error hidden" id="helpError"></div>
+          <button type="submit" class="btn btn-solid" id="helpSaveBtn" style="width:100%;">Save help page</button>
         </form>
       </div>
     </div>
@@ -289,28 +323,41 @@
 <div class="modal-overlay hidden" id="shippingOverlay">
   <div class="modal">
     <button class="modal-close" id="shippingClose">&times;</button>
-    <h2>Delivery details</h2>
-    <p class="sub">We need this to ship your order — saved for next time too.</p>
-    <form id="shippingForm">
-      <div class="field">
-        <label>Full name</label>
-        <input type="text" id="shipName" required>
-      </div>
-      <div class="field">
-        <label>Phone number</label>
-        <input type="tel" id="shipPhone" required inputmode="numeric" pattern="[0-9]{10}" maxlength="10" placeholder="10-digit mobile number">
-      </div>
-      <div class="field">
-        <label>Address</label>
-        <textarea id="shipAddress" required placeholder="House no, street, area, city, state"></textarea>
-      </div>
-      <div class="field">
-        <label>Pincode</label>
-        <input type="text" id="shipPincode" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6-digit pincode">
-      </div>
-      <div class="form-error hidden" id="shippingError"></div>
-      <button type="submit" class="btn btn-solid" style="width:100%;" id="shippingSubmitBtn">Continue to payment</button>
-    </form>
+
+    <!-- Shown when we already have saved details -->
+    <div id="shippingConfirmView" class="hidden">
+      <h2>Deliver here?</h2>
+      <p class="sub">Confirm your saved details, or edit them.</p>
+      <div class="order-shipping" id="shippingConfirmSummary" style="margin-bottom:16px;"></div>
+      <button class="btn btn-solid" style="width:100%;" id="shippingConfirmBtn">Confirm &amp; continue to payment</button>
+      <button class="btn-plain" style="display:block; margin:12px auto 0;" id="shippingEditBtn" type="button">Edit details</button>
+    </div>
+
+    <!-- Editable form (first order, or editing saved details) -->
+    <div id="shippingFormView">
+      <h2>Delivery details</h2>
+      <p class="sub">We need this to ship your order — saved for next time too.</p>
+      <form id="shippingForm">
+        <div class="field">
+          <label>Full name</label>
+          <input type="text" id="shipName" required>
+        </div>
+        <div class="field">
+          <label>Phone number</label>
+          <input type="tel" id="shipPhone" required inputmode="numeric" pattern="[0-9]{10}" maxlength="10" placeholder="10-digit mobile number">
+        </div>
+        <div class="field">
+          <label>Address</label>
+          <textarea id="shipAddress" required placeholder="House no, street, area, city, state"></textarea>
+        </div>
+        <div class="field">
+          <label>Pincode</label>
+          <input type="text" id="shipPincode" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6-digit pincode">
+        </div>
+        <div class="form-error hidden" id="shippingError"></div>
+        <button type="submit" class="btn btn-solid" style="width:100%;" id="shippingSubmitBtn">Continue to payment</button>
+      </form>
+    </div>
   </div>
 </div>
 
@@ -319,18 +366,22 @@
   <div class="modal">
     <button class="modal-close" id="checkoutClose">&times;</button>
     <h2>Scan to pay</h2>
-    <p class="sub">Order <span id="checkoutOrderId"></span></p>
+    <p class="sub" id="checkoutSub"></p>
     <div class="qr-box">
       <div id="qrCanvasHolder"></div>
       <div class="qr-amount" id="checkoutAmount">₹0</div>
+      <div class="upi-text-row hidden" id="upiTextRow">
+        <div><span class="upi-text-label">Payee:</span> <span id="upiPayeeText"></span></div>
+        <div><span class="upi-text-label">UPI ID:</span> <span id="upiIdText"></span> <button class="btn-plain" id="upiCopyBtn" type="button">Copy</button></div>
+      </div>
     </div>
     <div class="qr-steps">
-      1. Open any UPI app and scan the code above.<br>
+      1. Open any UPI app and scan the code above (or enter the UPI ID manually).<br>
       2. Pay the exact amount shown.<br>
-      3. Tap "I've paid" below — payments are verified manually, we'll confirm your order once checked.
+      3. Tap "I've paid" below — your order is placed the moment you confirm, and we verify payments manually.<br>
+      4. Need help? <button class="btn-plain" id="checkoutHelpBtn" type="button">Contact us</button>
     </div>
     <button class="btn btn-solid" style="width:100%; margin-top:16px;" id="confirmPaidBtn">I've paid</button>
-    <button class="btn-plain" style="display:block; margin:12px auto 0;" id="viewMyOrdersFromCheckout" type="button">View my orders</button>
   </div>
 </div>
 
@@ -344,12 +395,29 @@
   </div>
 </div>
 
+<!-- ===================== HELP / CONTACT MODAL (customer) ===================== -->
+<div class="modal-overlay hidden" id="helpOverlay">
+  <div class="modal">
+    <button class="modal-close" id="helpClose">&times;</button>
+    <h2>Need help?</h2>
+    <div id="helpContactsWrap"></div>
+    <div id="helpContentWrap" class="help-content"></div>
+  </div>
+</div>
+
 <!-- ===================== EDIT PRODUCT MODAL (admin) ===================== -->
 <div class="modal-overlay hidden" id="editProductOverlay">
   <div class="modal">
     <button class="modal-close" id="editProductClose">&times;</button>
-    <h2>Edit poster</h2>
+    <h2>Edit product</h2>
     <form id="editProductForm">
+      <div class="field">
+        <label>Product type</label>
+        <div class="type-toggle" id="editTypeToggle">
+          <label class="type-pill on"><input type="radio" name="editProductType" value="poster" checked><span>Poster</span></label>
+          <label class="type-pill"><input type="radio" name="editProductType" value="collection"><span>Collection</span></label>
+        </div>
+      </div>
       <div class="field">
         <label>Image (leave as-is to keep current image)</label>
         <div class="dropzone" id="editDropzone">
@@ -364,8 +432,8 @@
         <input type="text" id="editProductName" required>
       </div>
       <div class="field">
-        <label>Price (₹)</label>
-        <input type="number" id="editProductPrice" required min="0" step="1">
+        <label>Base price (₹) <span class="admin-only-tag">used only if no sizes are picked below</span></label>
+        <input type="number" id="editProductPrice" min="0" step="1">
       </div>
       <div class="field">
         <label>Details (optional)</label>
@@ -380,8 +448,8 @@
         <div class="checkbox-list" id="editProductSectionsList"></div>
       </div>
       <div class="field">
-        <label>Available sizes</label>
-        <div class="checkbox-list" id="editProductSizesList"></div>
+        <label>Available sizes &amp; their prices</label>
+        <div class="checkbox-list size-price-list" id="editProductSizesList"></div>
       </div>
       <div class="form-error hidden" id="editProductError"></div>
       <button type="submit" class="btn btn-solid" id="editProductSaveBtn" style="width:100%;">Save changes</button>
