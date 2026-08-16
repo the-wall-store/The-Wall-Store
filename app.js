@@ -11,32 +11,38 @@ const db = firebase.firestore();
 // Firebase Storage — see uploadImageToCloudinary() below and CLOUDINARY_CONFIG
 // in config.js.
 
+const MIN_ORDER_VALUE = 50; // ₹ — fix #3
+
 /* ---------------------------------------------------------------------- */
 /* State                                                                   */
 /* ---------------------------------------------------------------------- */
 let currentUser = null;
 let isOwner = false;
-let products = [];               // live from Firestore
-let sections = [];                // live from Firestore — admin-defined categories
-let sizes = [];                   // live from Firestore — global size options
-let cart = loadCart();           // { [productId]: { id, name, price, imageUrl, qty } }
-let pendingAfterAuth = null;      // fn to run right after a successful sign-in
-let authMode = "signin";          // "signin" | "signup"
-let selectedImageFile = null;     // for the "add product" form
-let selectedEditImageFile = null; // for the "edit product" form
-let selectedQrImageFile = null;   // for admin payment settings
-let selectedSizeImageFile = null; // for admin "add size" form
-let activeOrderId = null;
+let products = [];
+let sections = [];
+let sizes = [];
+let cart = loadCart();
+let pendingAfterAuth = null;
+let authMode = "signin";
+let selectedImageFile = null;
+let selectedEditImageFile = null;
+let selectedQrImageFile = null;
+let selectedSizeImageFile = null;
 let editingProductId = null;
 let searchQuery = "";
 let myOrdersUnsub = null;
+let activeStoreTab = "posters"; // "posters" | "collections" | a section id
+let savedShippingProfile = null; // cached from users/{uid}
+let pendingOrder = null; // { items, total, shipping } — held in memory until "I've paid"
 
-// Which sections/sizes are checked in each form. Sets persist selections
-// across re-renders triggered by live sections/sizes updates.
 let addSectionsSelected = new Set();
 let addSizesSelected = new Set();
+let addSizePrices = new Map(); // sizeId -> price string
 let editSectionsSelected = new Set();
 let editSizesSelected = new Set();
+let editSizePrices = new Map();
+
+let lastOrdersSnapshot = []; // most recent full orders list, for the unseen badge
 
 /* ---------------------------------------------------------------------- */
 /* Helpers                                                                  */
@@ -79,9 +85,6 @@ async function uploadImageToCloudinary(file){
   return data.secure_url;
 }
 
-// Scrolling the page while a number input happens to be focused makes
-// Chrome/Firefox silently increment/decrement its value. Blur any number
-// input the instant a wheel event reaches it.
 document.addEventListener("wheel", () => {
   const a = document.activeElement;
   if (a && a.tagName === "INPUT" && a.type === "number") a.blur();
@@ -93,6 +96,12 @@ function escapeHtml(s){
 
 function parseKeywords(str){
   return (str || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+function productMinPrice(p){
+  const entries = Object.values(p.sizePrices || {});
+  if (entries.length > 0) return Math.min(...entries);
+  return p.price || 0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -109,6 +118,7 @@ auth.onAuthStateChanged((user) => {
     el("modeLabel").textContent = "Admin dashboard";
     listenOrders();
     loadPaymentSettingsIntoForm();
+    loadHelpSettingsIntoAdminForm();
   } else {
     show(el("storeView"));
     hide(el("adminView"));
@@ -119,12 +129,11 @@ auth.onAuthStateChanged((user) => {
     const hadPending = !!pendingAfterAuth;
     const fn = pendingAfterAuth;
     pendingAfterAuth = null;
-    if (!el("authOverlay").classList.contains("hidden")){
-      closeAuthModal();
-    }
+    if (!el("authOverlay").classList.contains("hidden")) closeAuthModal();
     if (hadPending) fn();
   } else {
     if (myOrdersUnsub){ myOrdersUnsub(); myOrdersUnsub = null; }
+    savedShippingProfile = null;
   }
 });
 
@@ -143,7 +152,11 @@ function renderNav(){
     return;
   }
 
-  // My Orders (signed-in customers only)
+  const helpBtn = document.createElement("button");
+  helpBtn.className = "btn"; helpBtn.textContent = "Help";
+  helpBtn.onclick = openHelp;
+  wrap.appendChild(helpBtn);
+
   if (currentUser){
     const ordersBtn = document.createElement("button");
     ordersBtn.className = "btn"; ordersBtn.textContent = "My orders";
@@ -151,12 +164,10 @@ function renderNav(){
     wrap.appendChild(ordersBtn);
   }
 
-  // cart icon (always visible on store view)
   const cartBtn = document.createElement("button");
   cartBtn.className = "icon-btn"; cartBtn.title = "Cart"; cartBtn.id = "cartBtn";
   cartBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M3 3h2l2.4 12.4a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L21 8H6"/><circle cx="9" cy="21" r="1"/><circle cx="18" cy="21" r="1"/></svg><span class="badge-count hidden" id="cartCount">0</span>`;
   cartBtn.onclick = openCart;
-
   wrap.appendChild(cartBtn);
 
   if (currentUser){
@@ -240,7 +251,6 @@ el("authForm").addEventListener("submit", async (e) => {
     } else {
       await auth.createUserWithEmailAndPassword(email, password);
     }
-    // onAuthStateChanged handles the rest (closing modal, pending action)
   } catch(err){
     errBox.textContent = friendlyAuthError(err);
     show(errBox);
@@ -249,8 +259,6 @@ el("authForm").addEventListener("submit", async (e) => {
   }
 });
 
-// Fix #8: forgotten passwords. Firebase's Email/Password provider comes
-// with a built-in reset-email flow — no extra setup or paid tier needed.
 el("forgotPasswordBtn").onclick = async () => {
   const email = el("authEmail").value.trim();
   const errBox = el("authError");
@@ -304,12 +312,12 @@ db.collection("sections").orderBy("createdAt", "asc").onSnapshot((snap) => {
 
 db.collection("sizes").orderBy("createdAt", "asc").onSnapshot((snap) => {
   sizes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  renderStore();
   renderSizesAdminList();
-  renderCheckboxPills(el("productSizesList"), sizes, addSizesSelected, s => s.label);
-  renderCheckboxPills(el("editProductSizesList"), sizes, editSizesSelected, s => s.label);
+  renderSizePricingList(el("productSizesList"), addSizesSelected, addSizePrices);
+  renderSizePricingList(el("editProductSizesList"), editSizesSelected, editSizePrices);
 }, (err) => console.error("sizes listener", err));
 
-// Reusable toggle-pill renderer for "which sections/sizes apply" pickers.
 function renderCheckboxPills(container, items, selectedSet, getLabel){
   if (!container) return;
   container.innerHTML = "";
@@ -331,8 +339,52 @@ function renderCheckboxPills(container, items, selectedSet, getLabel){
   });
 }
 
+// Sizes need a price attached to each selection — separate renderer.
+function renderSizePricingList(container, selectedSet, pricesMap){
+  if (!container) return;
+  container.innerHTML = "";
+  if (sizes.length === 0){
+    container.innerHTML = `<p class="empty-note">No sizes yet — add some in the Sizes tab.</p>`;
+    return;
+  }
+  sizes.forEach(sz => {
+    const row = document.createElement("div");
+    row.className = "size-price-row";
+
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "checkbox-pill" + (selectedSet.has(sz.id) ? " on" : "");
+    pill.textContent = sz.label;
+
+    const priceInput = document.createElement("input");
+    priceInput.type = "number";
+    priceInput.min = "0";
+    priceInput.step = "1";
+    priceInput.className = "size-price-input" + (selectedSet.has(sz.id) ? "" : " hidden");
+    priceInput.placeholder = `Price for ${sz.label}`;
+    priceInput.value = pricesMap.has(sz.id) ? pricesMap.get(sz.id) : "";
+    priceInput.addEventListener("input", () => pricesMap.set(sz.id, priceInput.value));
+
+    pill.onclick = () => {
+      if (selectedSet.has(sz.id)){
+        selectedSet.delete(sz.id);
+        pill.classList.remove("on");
+        priceInput.classList.add("hidden");
+      } else {
+        selectedSet.add(sz.id);
+        pill.classList.add("on");
+        priceInput.classList.remove("hidden");
+        priceInput.focus();
+      }
+    };
+
+    row.append(pill, priceInput);
+    container.appendChild(row);
+  });
+}
+
 /* ---------------------------------------------------------------------- */
-/* Store rendering: sections + bestsellers + search                        */
+/* Store rendering: tabs + bestsellers + search                            */
 /* ---------------------------------------------------------------------- */
 function matchesSearch(p, q){
   if (p.name && p.name.toLowerCase().includes(q)) return true;
@@ -349,7 +401,6 @@ function renderStore(){
   hide(el("searchResultsWrap"));
   show(el("browseWrap"));
 
-  // Bestsellers (tag-based, independent of sections)
   const bestsellers = products.filter(p => (p.tags || []).includes("bestseller"));
   const bestGrid = el("bestsellerGrid");
   bestGrid.innerHTML = "";
@@ -360,43 +411,54 @@ function renderStore(){
     bestsellers.forEach(p => bestGrid.appendChild(productCard(p)));
   }
 
-  // Admin-defined sections
-  const container = el("sectionsContainer");
-  container.innerHTML = "";
-  const validSectionIds = new Set(sections.map(s => s.id));
+  renderStoreTabs();
 
-  sections.forEach(sec => {
-    const inSection = products.filter(p => (p.sections || []).includes(sec.id));
-    if (inSection.length === 0) return; // don't show empty sections
-    container.appendChild(sectionBlock(sec.name, inSection));
-  });
-
-  // Anything not filed into a (still-existing) section — keeps products
-  // from silently disappearing, and covers the "no sections set up yet"
-  // case with a friendly fallback.
-  const leftover = products.filter(p => !(p.sections || []).some(id => validSectionIds.has(id)));
-  if (leftover.length > 0){
-    container.appendChild(sectionBlock(sections.length === 0 ? "All posters" : "More posters", leftover));
+  if (activeStoreTab !== "posters" && activeStoreTab !== "collections" &&
+      !sections.some(s => s.id === activeStoreTab)){
+    activeStoreTab = "posters";
   }
 
-  if (products.length === 0){
-    show(el("emptyNote"));
+  let list, emptyMsg;
+  if (activeStoreTab === "posters"){
+    list = products.filter(p => (p.type || "poster") !== "collection");
+    emptyMsg = "No posters up yet — check back soon.";
+  } else if (activeStoreTab === "collections"){
+    list = products.filter(p => p.type === "collection");
+    emptyMsg = "No collections up yet — check back soon.";
   } else {
-    hide(el("emptyNote"));
+    list = products.filter(p => (p.sections || []).includes(activeStoreTab));
+    emptyMsg = "Nothing in this section yet.";
   }
+
+  const grid = el("activeTabGrid");
+  grid.innerHTML = "";
+  const emptyNote = el("activeTabEmptyNote");
+  if (list.length === 0){
+    emptyNote.textContent = emptyMsg;
+    show(emptyNote);
+  } else {
+    hide(emptyNote);
+    list.forEach(p => grid.appendChild(productCard(p)));
+  }
+
+  hide(el("emptyNote"));
 }
 
-function sectionBlock(label, items){
-  const wrap = document.createElement("div");
-  wrap.className = "store-section";
-  const heading = document.createElement("p");
-  heading.className = "section-label";
-  heading.textContent = label;
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  items.forEach(p => grid.appendChild(productCard(p)));
-  wrap.append(heading, grid);
-  return wrap;
+function renderStoreTabs(){
+  const wrap = el("storeTabs");
+  wrap.innerHTML = "";
+  const tabs = [
+    { key: "posters", label: "All Posters" },
+    { key: "collections", label: "All Collections" },
+    ...sections.map(s => ({ key: s.id, label: s.name })),
+  ];
+  tabs.forEach(t => {
+    const btn = document.createElement("button");
+    btn.className = "store-tab" + (activeStoreTab === t.key ? " active" : "");
+    btn.textContent = t.label;
+    btn.onclick = () => { activeStoreTab = t.key; renderStore(); };
+    wrap.appendChild(btn);
+  });
 }
 
 function renderSearchResults(){
@@ -436,6 +498,9 @@ function productCard(p){
   card.className = "card";
   const oos = (p.tags || []).includes("out_of_stock");
   const best = (p.tags || []).includes("bestseller");
+  const hasSizes = (p.sizes || []).length > 0;
+  const priceLabel = hasSizes ? `From ${money(productMinPrice(p))}` : money(p.price);
+
   card.innerHTML = `
     <div class="tape"></div>
     <div class="thumb-wrap">
@@ -444,12 +509,14 @@ function productCard(p){
       ${best ? `<div class="fav-tag">★ Bestseller</div>` : ""}
     </div>
     <h3>${escapeHtml(p.name)}</h3>
-    <div class="price-row"><span class="price">${money(p.price)}</span></div>
-    <button class="add-btn" ${oos ? "disabled" : ""}>${oos ? "Out of stock" : "Add to cart"}</button>
+    <div class="price-row"><span class="price">${priceLabel}</span></div>
+    <button class="add-btn" ${oos ? "disabled" : ""}>${oos ? "Out of stock" : (hasSizes ? "Select size" : "Add to cart")}</button>
   `;
   card.querySelector(".add-btn").addEventListener("click", (e) => {
     e.stopPropagation();
-    if (!oos) addToCart(p);
+    if (oos) return;
+    if (hasSizes) openDetail(p);
+    else addToCart(p, null);
   });
   card.addEventListener("click", () => openDetail(p));
   return card;
@@ -458,10 +525,18 @@ function productCard(p){
 /* ---------------------------------------------------------------------- */
 /* Product detail modal                                                    */
 /* ---------------------------------------------------------------------- */
+let detailSelectedSizeId = null;
+
 function openDetail(p){
   const oos = (p.tags || []).includes("out_of_stock");
   const best = (p.tags || []).includes("bestseller");
   const productSizes = (p.sizes || []).map(id => sizes.find(s => s.id === id)).filter(Boolean);
+  detailSelectedSizeId = productSizes.length > 0 ? productSizes[0].id : null;
+
+  function currentPrice(){
+    if (!detailSelectedSizeId) return p.price || 0;
+    return (p.sizePrices || {})[detailSelectedSizeId] ?? 0;
+  }
 
   el("detailContent").innerHTML = `
     <div class="thumb-wrap detail-thumb">
@@ -470,10 +545,10 @@ function openDetail(p){
     <div>
       ${best ? `<div class="fav-tag" style="position:static; display:inline-block; margin-bottom:10px;">★ Bestseller</div>` : ""}
       <h2 style="margin-top:0;">${escapeHtml(p.name)}</h2>
-      <div class="price-row" style="font-size:20px; margin-bottom:14px;"><span class="price">${money(p.price)}</span></div>
+      <div class="price-row" style="font-size:20px; margin-bottom:14px;"><span class="price" id="detailPrice">${money(currentPrice())}</span></div>
       <p style="font-size:14px; line-height:1.6; color:var(--grey);">${escapeHtml(p.details || "No extra details for this print.")}</p>
       ${productSizes.length > 0 ? `
-        <p class="field label" style="font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--grey); margin:16px 0 0;">Available sizes — tap to compare</p>
+        <p style="font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--grey); margin:16px 0 0;">Size — tap to select, tap the selected one again to see it to scale</p>
         <div class="size-pill-row" id="detailSizeRow"></div>
       ` : ""}
       <button class="btn btn-solid" style="width:100%; margin-top:16px;" id="detailAddBtn" ${oos ? "disabled" : ""}>
@@ -484,23 +559,35 @@ function openDetail(p){
 
   if (productSizes.length > 0){
     const row = el("detailSizeRow");
-    productSizes.forEach(sz => {
-      const pill = document.createElement("button");
-      pill.type = "button";
-      pill.className = "size-pill";
-      pill.textContent = sz.label;
-      if (sz.referenceImageUrl){
-        pill.onclick = () => openSizeRef(sz);
-      } else {
-        pill.onclick = () => toast(`No size-reference image for "${sz.label}" yet.`);
-      }
-      row.appendChild(pill);
-    });
+    function renderPills(){
+      row.innerHTML = "";
+      productSizes.forEach(sz => {
+        const pill = document.createElement("button");
+        pill.type = "button";
+        pill.className = "size-pill" + (sz.id === detailSelectedSizeId ? " selected" : "");
+        pill.textContent = sz.label;
+        pill.onclick = () => {
+          if (detailSelectedSizeId === sz.id && sz.referenceImageUrl){
+            openSizeRef(sz);
+            return;
+          }
+          detailSelectedSizeId = sz.id;
+          el("detailPrice").textContent = money(currentPrice());
+          renderPills();
+        };
+        row.appendChild(pill);
+      });
+    }
+    renderPills();
   }
 
   const btn = el("detailAddBtn");
   if (btn && !oos){
-    btn.onclick = () => { addToCart(p); closeDetail(); };
+    btn.onclick = () => {
+      const sz = productSizes.find(s => s.id === detailSelectedSizeId);
+      addToCart(p, sz ? { id: sz.id, label: sz.label, price: currentPrice() } : null);
+      closeDetail();
+    };
   }
   show(el("detailOverlay"));
 }
@@ -517,13 +604,22 @@ el("sizeRefClose").onclick = () => hide(el("sizeRefOverlay"));
 el("sizeRefOverlay").addEventListener("click", (e) => { if (e.target === el("sizeRefOverlay")) hide(el("sizeRefOverlay")); });
 
 /* ---------------------------------------------------------------------- */
-/* Cart                                                                     */
+/* Cart — keyed by product+size combo so different sizes are separate lines */
 /* ---------------------------------------------------------------------- */
-function addToCart(p){
-  if (!cart[p.id]){
-    cart[p.id] = { id: p.id, name: p.name, price: p.price, imageUrl: p.imageUrl, qty: 0 };
+function addToCart(p, size){
+  const key = size ? `${p.id}__${size.id}` : p.id;
+  if (!cart[key]){
+    cart[key] = {
+      cartKey: key,
+      productId: p.id,
+      name: p.name + (size ? ` (${size.label})` : ""),
+      sizeLabel: size ? size.label : null,
+      price: size ? size.price : (p.price || 0),
+      imageUrl: p.imageUrl,
+      qty: 0,
+    };
   }
-  cart[p.id].qty += 1;
+  cart[key].qty += 1;
   saveCart();
   updateCartBadge();
   toast(`Added "${p.name}" to cart`);
@@ -567,10 +663,10 @@ function renderCart(){
     row.querySelector('[data-act="inc"]').onclick = () => { item.qty++; saveCart(); renderCart(); updateCartBadge(); };
     row.querySelector('[data-act="dec"]').onclick = () => {
       item.qty--;
-      if (item.qty <= 0) delete cart[item.id];
+      if (item.qty <= 0) delete cart[item.cartKey];
       saveCart(); renderCart(); updateCartBadge();
     };
-    row.querySelector(".remove").onclick = () => { delete cart[item.id]; saveCart(); renderCart(); updateCartBadge(); };
+    row.querySelector(".remove").onclick = () => { delete cart[item.cartKey]; saveCart(); renderCart(); updateCartBadge(); };
     wrap.appendChild(row);
   });
   el("cartTotal").textContent = money(cartTotal());
@@ -580,14 +676,21 @@ function cartTotal(){
   return Object.values(cart).reduce((s, i) => s + i.price * i.qty, 0);
 }
 
+// Fix #3: minimum order value.
 el("placeOrderBtn").onclick = () => {
+  const err = el("cartError");
   if (Object.keys(cart).length === 0){
-    const err = el("cartError");
     err.textContent = "Your cart is empty.";
     show(err);
     return;
   }
-  hide(el("cartError"));
+  const total = cartTotal();
+  if (total < MIN_ORDER_VALUE){
+    err.textContent = `Minimum order is ${money(MIN_ORDER_VALUE)} — add a bit more to check out.`;
+    show(err);
+    return;
+  }
+  hide(err);
   if (!currentUser){
     closeCart();
     openAuthModal(() => openShippingModal());
@@ -598,25 +701,54 @@ el("placeOrderBtn").onclick = () => {
 };
 
 /* ---------------------------------------------------------------------- */
-/* Shipping details                                                        */
+/* Shipping details — fix #6: confirm-saved-details screen                 */
 /* ---------------------------------------------------------------------- */
 async function openShippingModal(){
   hide(el("shippingError"));
   el("shippingForm").reset();
+
   try{
     const doc = await db.collection("users").doc(currentUser.uid).get();
-    if (doc.exists){
-      const d = doc.data();
-      el("shipName").value = d.name || "";
-      el("shipPhone").value = d.phone || "";
-      el("shipAddress").value = d.address || "";
-      el("shipPincode").value = d.pincode || "";
-    }
+    savedShippingProfile = doc.exists ? doc.data() : null;
   } catch(e){
-    console.error("prefill shipping", e);
+    console.error("load shipping profile", e);
+    savedShippingProfile = null;
+  }
+
+  if (savedShippingProfile && savedShippingProfile.name){
+    showShippingConfirmView();
+  } else {
+    showShippingEditView();
   }
   show(el("shippingOverlay"));
 }
+
+function showShippingConfirmView(){
+  const d = savedShippingProfile;
+  el("shippingConfirmSummary").innerHTML =
+    `${escapeHtml(d.name || "")}<br>${escapeHtml(d.phone || "")}<br>${escapeHtml(d.address || "")}<br>PIN ${escapeHtml(d.pincode || "")}`;
+  show(el("shippingConfirmView"));
+  hide(el("shippingFormView"));
+}
+
+function showShippingEditView(){
+  if (savedShippingProfile){
+    el("shipName").value = savedShippingProfile.name || "";
+    el("shipPhone").value = savedShippingProfile.phone || "";
+    el("shipAddress").value = savedShippingProfile.address || "";
+    el("shipPincode").value = savedShippingProfile.pincode || "";
+  }
+  hide(el("shippingConfirmView"));
+  show(el("shippingFormView"));
+}
+
+el("shippingEditBtn").onclick = showShippingEditView;
+
+el("shippingConfirmBtn").onclick = () => {
+  const d = savedShippingProfile;
+  proceedToCheckout({ name: d.name, phone: d.phone, address: d.address, pincode: d.pincode });
+};
+
 function closeShippingModal(){ hide(el("shippingOverlay")); }
 el("shippingClose").onclick = closeShippingModal;
 el("shippingOverlay").addEventListener("click", (e) => { if (e.target === el("shippingOverlay")) closeShippingModal(); });
@@ -645,52 +777,37 @@ el("shippingForm").addEventListener("submit", async (e) => {
 
   const btn = el("shippingSubmitBtn");
   btn.disabled = true;
-  btn.textContent = "Placing order…";
-  await placeOrder(shipping);
+  btn.textContent = "Continuing…";
+
+  // Save the profile the moment we have valid details — independent of
+  // whether the customer goes on to actually pay, so it's there next time
+  // regardless. (Fix #6 — this used to only fire deep inside order
+  // creation, which no longer happens at this step; see fix #9.)
+  db.collection("users").doc(currentUser.uid).set(shipping, { merge: true }).catch((e) => {
+    console.error("save shipping profile", e);
+  });
+  savedShippingProfile = shipping;
+
+  proceedToCheckout(shipping);
   btn.disabled = false;
   btn.textContent = "Continue to payment";
 });
 
-/* ---------------------------------------------------------------------- */
-/* Checkout / order creation                                               */
-/* ---------------------------------------------------------------------- */
-async function placeOrder(shipping){
+function proceedToCheckout(shipping){
   const items = Object.values(cart).map(i => ({
-    productId: i.id, name: i.name, price: i.price, qty: i.qty,
+    productId: i.productId, name: i.name, price: i.price, qty: i.qty, sizeLabel: i.sizeLabel || null,
   }));
   const total = cartTotal();
-
-  let orderId;
-  try{
-    const orderRef = await db.collection("orders").add({
-      userId: currentUser.uid,
-      userEmail: currentUser.email,
-      items,
-      total,
-      shipping,
-      status: "awaiting_verification",
-      customerConfirmedPaid: false,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-    });
-    orderId = orderRef.id;
-  } catch(e){
-    console.error("placeOrder", e);
-    toast("Couldn't place the order — please try again.");
-    return;
-  }
-
-  db.collection("users").doc(currentUser.uid).set(shipping, { merge: true }).catch((e) => {
-    console.error("save shipping profile", e);
-  });
-
-  cart = {};
-  saveCart();
-  updateCartBadge();
+  pendingOrder = { items, total, shipping };
   closeShippingModal();
-  activeOrderId = orderId;
-  openCheckout(orderId, total);
+  openCheckout();
 }
 
+/* ---------------------------------------------------------------------- */
+/* Checkout / payment screen — fix #9: nothing is saved to the database    */
+/* until the customer taps "I've paid". Fix #8: UPI ID/payee name are      */
+/* always shown as plain text too, and the help link is wired up.         */
+/* ---------------------------------------------------------------------- */
 async function getPaymentSettings(){
   try{
     const doc = await db.collection("settings").doc("payment").get();
@@ -708,9 +825,11 @@ async function getPaymentSettings(){
   return { upiId: UPI_CONFIG.upiId, payeeName: UPI_CONFIG.payeeName, qrImageUrl: null };
 }
 
-async function openCheckout(orderId, total){
-  el("checkoutOrderId").textContent = "#" + orderId.slice(0, 6).toUpperCase();
-  el("checkoutAmount").textContent = money(total);
+async function openCheckout(){
+  if (!pendingOrder) return;
+  el("checkoutSub").textContent = `${pendingOrder.items.reduce((s,i)=>s+i.qty,0)} item(s)`;
+  el("checkoutAmount").textContent = money(pendingOrder.total);
+  hide(el("upiTextRow"));
   show(el("checkoutOverlay"));
 
   const holder = el("qrCanvasHolder");
@@ -734,50 +853,75 @@ async function openCheckout(orderId, total){
       const upiUri = "upi://pay?" + [
         "pa=" + encodeURIComponent(settings.upiId),
         "pn=" + encodeURIComponent(settings.payeeName),
-        "am=" + encodeURIComponent(total),
+        "am=" + encodeURIComponent(pendingOrder.total),
         "cu=INR",
-        "tn=" + encodeURIComponent("Order " + orderId.slice(0, 6)),
+        "tn=" + encodeURIComponent("The Wall Store order"),
       ].join("&");
       QRCode.toCanvas(canvas, upiUri, { width: 220, margin: 1 }, (err) => {
         if (err) console.error(err);
       });
     }
+
+    // Fix #8: always show the UPI ID / payee name as plain text too, not
+    // just baked into the QR image data.
+    if (settings.upiId){
+      el("upiPayeeText").textContent = settings.payeeName || "The Wall Store";
+      el("upiIdText").textContent = settings.upiId;
+      show(el("upiTextRow"));
+    }
   } catch(e){
     console.error("openCheckout render", e);
-    holder.innerHTML = `<p class="empty-note" style="padding:20px 0;">Couldn't load the payment code — your order is saved either way. Try reopening it from "My orders".</p>`;
+    holder.innerHTML = `<p class="empty-note" style="padding:20px 0;">Couldn't load the payment code — try closing and reopening checkout from your cart.</p>`;
   }
 }
 function closeCheckout(){ hide(el("checkoutOverlay")); }
 el("checkoutClose").onclick = closeCheckout;
-el("viewMyOrdersFromCheckout").onclick = () => { closeCheckout(); openMyOrders(); };
+el("checkoutHelpBtn").onclick = () => { openHelp(); };
 
+el("upiCopyBtn").onclick = () => {
+  const text = el("upiIdText").textContent;
+  navigator.clipboard?.writeText(text).then(() => toast("UPI ID copied")).catch(() => {});
+};
+
+// This is the ONLY place an order document gets created — only after the
+// customer explicitly confirms they've paid. Fixes #9: previously the
+// order was written the moment checkout opened, so unpaid/abandoned
+// checkouts still showed up for the admin and in "My orders".
 el("confirmPaidBtn").onclick = async () => {
-  if (!activeOrderId) { closeCheckout(); return; }
+  if (!pendingOrder || !currentUser) { closeCheckout(); return; }
   const btn = el("confirmPaidBtn");
   btn.disabled = true;
+  btn.textContent = "Placing order…";
   try{
-    await db.collection("orders").doc(activeOrderId).update({ customerConfirmedPaid: true });
-    toast("Thanks! We'll confirm your payment shortly.");
+    await db.collection("orders").add({
+      userId: currentUser.uid,
+      userEmail: currentUser.email,
+      items: pendingOrder.items,
+      total: pendingOrder.total,
+      shipping: pendingOrder.shipping,
+      status: "awaiting_verification",
+      customerConfirmedPaid: true,
+      seenByAdmin: false,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    cart = {};
+    saveCart();
+    updateCartBadge();
+    pendingOrder = null;
+    closeCheckout();
+    toast("Order placed! We'll verify your payment and confirm shortly.");
   } catch(e){
-    console.error(e);
-    toast("Couldn't save that — please try again.");
+    console.error("confirmPaid order create", e);
+    toast("Couldn't place the order — please try again.");
   } finally {
     btn.disabled = false;
-    closeCheckout();
+    btn.textContent = "I've paid";
   }
 };
 
 /* ---------------------------------------------------------------------- */
-/* My orders (customer) — fix #2                                          */
+/* My orders (customer)                                                    */
 /* ---------------------------------------------------------------------- */
-// Previously this used .where(userId).orderBy(createdAt) in a single
-// one-off .get(). Firestore requires a composite index for an equality
-// filter combined with orderBy on a different field — without deploying
-// that index, the query throws and the customer just saw "couldn't load
-// your orders" (their order existed the whole time). Fixed by querying
-// with only the equality filter (needs no special index) and sorting
-// client-side, and made it a live listener so status changes (paid /
-// rejected / delivered) update instantly while the page is open.
 function openMyOrders(){
   show(el("myOrdersOverlay"));
   const wrap = el("myOrdersList");
@@ -809,9 +953,77 @@ function closeMyOrders(){
 el("myOrdersClose").onclick = closeMyOrders;
 el("myOrdersOverlay").addEventListener("click", (e) => { if (e.target === el("myOrdersOverlay")) closeMyOrders(); });
 
+/* ---------------------------------------------------------------------- */
+/* Help / Contact page (customer) — feature #4                            */
+/* ---------------------------------------------------------------------- */
+function contactHref(value){
+  const v = (value || "").trim();
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return "mailto:" + v;
+  if (/^https?:\/\//i.test(v)) return v;
+  if (/^[+\d][\d\s-]{6,}$/.test(v)) return "tel:" + v.replace(/[^\d+]/g, "");
+  return null;
+}
+
+async function openHelp(){
+  show(el("helpOverlay"));
+  el("helpContactsWrap").innerHTML = `<p class="empty-note">Loading…</p>`;
+  el("helpContentWrap").textContent = "";
+  try{
+    const doc = await db.collection("settings").doc("help").get();
+    const d = doc.exists ? doc.data() : {};
+    const contacts = d.contacts || [];
+    const contactsWrap = el("helpContactsWrap");
+    contactsWrap.innerHTML = "";
+    if (contacts.length > 0){
+      const row = document.createElement("div");
+      row.className = "contact-card-row";
+      contacts.forEach(c => {
+        const href = contactHref(c.value);
+        const card = document.createElement(href ? "a" : "div");
+        card.className = "contact-card";
+        if (href){ card.href = href; card.target = "_blank"; card.rel = "noopener"; }
+        card.innerHTML = `<span class="contact-label">${escapeHtml(c.label || "Contact")}</span><span class="contact-value">${escapeHtml(c.value || "")}</span>`;
+        row.appendChild(card);
+      });
+      contactsWrap.appendChild(row);
+    }
+    el("helpContentWrap").textContent = d.content || "";
+  } catch(e){
+    console.error("openHelp", e);
+    el("helpContactsWrap").innerHTML = "";
+    el("helpContentWrap").textContent = "Couldn't load the help page right now — please try again.";
+  }
+}
+el("helpClose").onclick = () => hide(el("helpOverlay"));
+el("helpOverlay").addEventListener("click", (e) => { if (e.target === el("helpOverlay")) hide(el("helpOverlay")); });
+el("footerHelpBtn").onclick = openHelp;
+
 /* ======================================================================= */
 /* ADMIN — product management                                              */
 /* ======================================================================= */
+function setupTypeToggle(containerId){
+  const container = el(containerId);
+  container.querySelectorAll("input[type=radio]").forEach(radio => {
+    radio.addEventListener("change", () => {
+      container.querySelectorAll(".type-pill").forEach(p => p.classList.remove("on"));
+      radio.closest(".type-pill").classList.add("on");
+    });
+  });
+}
+setupTypeToggle("addTypeToggle");
+setupTypeToggle("editTypeToggle");
+function getSelectedType(containerId){
+  const checked = el(containerId).querySelector("input[type=radio]:checked");
+  return checked ? checked.value : "poster";
+}
+function setSelectedType(containerId, type){
+  const container = el(containerId);
+  container.querySelectorAll("input[type=radio]").forEach(radio => {
+    radio.checked = radio.value === type;
+    radio.closest(".type-pill").classList.toggle("on", radio.checked);
+  });
+}
+
 el("dropzone").addEventListener("click", () => el("productImage").click());
 el("productImage").addEventListener("change", (e) => {
   const file = e.target.files[0];
@@ -833,10 +1045,12 @@ function resetAddProductForm(){
   const dz = el("dropzone");
   dz.classList.remove("has-image");
   el("dropzonePreview").innerHTML = `<span id="dropzoneText">Click to choose an image</span>`;
+  setSelectedType("addTypeToggle", "poster");
   addSectionsSelected = new Set();
   addSizesSelected = new Set();
+  addSizePrices = new Map();
   renderCheckboxPills(el("productSectionsList"), sections, addSectionsSelected, s => s.name);
-  renderCheckboxPills(el("productSizesList"), sizes, addSizesSelected, s => s.label);
+  renderSizePricingList(el("productSizesList"), addSizesSelected, addSizePrices);
 }
 
 el("addProductForm").addEventListener("submit", async (e) => {
@@ -845,17 +1059,37 @@ el("addProductForm").addEventListener("submit", async (e) => {
   hide(errBox);
 
   const name = el("productName").value.trim();
-  const price = Number(el("productPrice").value);
+  const basePrice = Number(el("productPrice").value) || 0;
   const details = el("productDetails").value.trim();
   const keywords = parseKeywords(el("productKeywords").value);
+  const type = getSelectedType("addTypeToggle");
+  const sizeIds = Array.from(addSizesSelected);
 
   if (!selectedImageFile){
     errBox.textContent = "Please choose an image.";
     show(errBox);
     return;
   }
-  if (!name || !price || price <= 0){
-    errBox.textContent = "Please add a name and a valid price.";
+  if (!name){
+    errBox.textContent = "Please add a name.";
+    show(errBox);
+    return;
+  }
+
+  const sizePrices = {};
+  if (sizeIds.length > 0){
+    for (const id of sizeIds){
+      const val = Number(addSizePrices.get(id));
+      if (!val || val <= 0){
+        const sz = sizes.find(s => s.id === id);
+        errBox.textContent = `Set a valid price for "${sz ? sz.label : "a selected size"}".`;
+        show(errBox);
+        return;
+      }
+      sizePrices[id] = val;
+    }
+  } else if (!basePrice || basePrice <= 0){
+    errBox.textContent = "Add a base price, or pick at least one size with a price.";
     show(errBox);
     return;
   }
@@ -868,17 +1102,19 @@ el("addProductForm").addEventListener("submit", async (e) => {
     const imageUrl = await uploadImageToCloudinary(selectedImageFile);
 
     await db.collection("products").add({
-      name, price, details,
+      name, price: basePrice, details,
       imageUrl,
+      type,
       tags: [],
       keywords,
       sections: Array.from(addSectionsSelected),
-      sizes: Array.from(addSizesSelected),
+      sizes: sizeIds,
+      sizePrices,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
 
     resetAddProductForm();
-    toast("Poster added");
+    toast("Product added");
   } catch(err){
     console.error(err);
     errBox.textContent = "Upload failed — check your connection and try again.";
@@ -897,11 +1133,20 @@ function renderAdminProducts(){
 
   products.forEach(p => {
     const tags = p.tags || [];
+    const hasSizes = (p.sizes || []).length > 0;
+    let priceCell;
+    if (hasSizes){
+      const vals = Object.values(p.sizePrices || {});
+      priceCell = vals.length ? `${money(Math.min(...vals))}–${money(Math.max(...vals))}` : "—";
+    } else {
+      priceCell = money(p.price);
+    }
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><img src="${p.imageUrl}" alt=""></td>
       <td>${escapeHtml(p.name)}</td>
-      <td>${money(p.price)}</td>
+      <td style="text-transform:capitalize;">${escapeHtml(p.type || "poster")}</td>
+      <td>${priceCell}</td>
       <td>
         <div class="row-actions">
           <button class="tag-pill bestseller ${tags.includes("bestseller") ? "on" : ""}" data-tag="bestseller">★ Bestseller</button>
@@ -938,7 +1183,7 @@ async function deleteProduct(productId, name){
   if (!confirm(`Delete "${name}"? This can't be undone.`)) return;
   try{
     await db.collection("products").doc(productId).delete();
-    toast("Poster deleted");
+    toast("Deleted");
   } catch(e){ console.error(e); toast("Couldn't delete — try again."); }
 }
 
@@ -968,14 +1213,16 @@ function openEditProduct(p){
   el("editProductPrice").value = p.price || "";
   el("editProductDetails").value = p.details || "";
   el("editProductKeywords").value = (p.keywords || []).join(", ");
+  setSelectedType("editTypeToggle", p.type || "poster");
   const dz = el("editDropzone");
   dz.classList.add("has-image");
   el("editDropzonePreview").innerHTML = `<img src="${p.imageUrl}" alt="current image">`;
 
   editSectionsSelected = new Set(p.sections || []);
   editSizesSelected = new Set(p.sizes || []);
+  editSizePrices = new Map(Object.entries(p.sizePrices || {}));
   renderCheckboxPills(el("editProductSectionsList"), sections, editSectionsSelected, s => s.name);
-  renderCheckboxPills(el("editProductSizesList"), sizes, editSizesSelected, s => s.label);
+  renderSizePricingList(el("editProductSizesList"), editSizesSelected, editSizePrices);
 
   show(el("editProductOverlay"));
 }
@@ -990,12 +1237,32 @@ el("editProductForm").addEventListener("submit", async (e) => {
   if (!editingProductId) return;
 
   const name = el("editProductName").value.trim();
-  const price = Number(el("editProductPrice").value);
+  const basePrice = Number(el("editProductPrice").value) || 0;
   const details = el("editProductDetails").value.trim();
   const keywords = parseKeywords(el("editProductKeywords").value);
+  const type = getSelectedType("editTypeToggle");
+  const sizeIds = Array.from(editSizesSelected);
 
-  if (!name || !price || price <= 0){
-    errBox.textContent = "Please add a name and a valid price.";
+  if (!name){
+    errBox.textContent = "Please add a name.";
+    show(errBox);
+    return;
+  }
+
+  const sizePrices = {};
+  if (sizeIds.length > 0){
+    for (const id of sizeIds){
+      const val = Number(editSizePrices.get(id));
+      if (!val || val <= 0){
+        const sz = sizes.find(s => s.id === id);
+        errBox.textContent = `Set a valid price for "${sz ? sz.label : "a selected size"}".`;
+        show(errBox);
+        return;
+      }
+      sizePrices[id] = val;
+    }
+  } else if (!basePrice || basePrice <= 0){
+    errBox.textContent = "Add a base price, or pick at least one size with a price.";
     show(errBox);
     return;
   }
@@ -1006,16 +1273,17 @@ el("editProductForm").addEventListener("submit", async (e) => {
 
   try{
     const update = {
-      name, price, details, keywords,
+      name, price: basePrice, details, keywords, type,
       sections: Array.from(editSectionsSelected),
-      sizes: Array.from(editSizesSelected),
+      sizes: sizeIds,
+      sizePrices,
     };
     if (selectedEditImageFile){
       update.imageUrl = await uploadImageToCloudinary(selectedEditImageFile);
     }
     await db.collection("products").doc(editingProductId).update(update);
     closeEditProduct();
-    toast("Poster updated");
+    toast("Product updated");
   } catch(err){
     console.error(err);
     errBox.textContent = "Couldn't save changes — check your connection and try again.";
@@ -1027,7 +1295,7 @@ el("editProductForm").addEventListener("submit", async (e) => {
 });
 
 /* ---------------------------------------------------------------------- */
-/* ADMIN — sections (feature #3)                                          */
+/* ADMIN — sections                                                        */
 /* ---------------------------------------------------------------------- */
 el("addSectionForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1058,11 +1326,11 @@ function renderSectionsAdminList(){
     row.className = "list-row";
     row.innerHTML = `
       <span class="list-name">${escapeHtml(s.name)}</span>
-      <span class="list-count">${count} poster${count === 1 ? "" : "s"}</span>
+      <span class="list-count">${count} item${count === 1 ? "" : "s"}</span>
       <button class="link-danger" type="button">Delete</button>
     `;
     row.querySelector("button").onclick = async () => {
-      if (!confirm(`Delete section "${s.name}"? Posters in it stay listed, just ungrouped.`)) return;
+      if (!confirm(`Delete section "${s.name}"? Products in it stay listed, just ungrouped.`)) return;
       try{ await db.collection("sections").doc(s.id).delete(); toast("Section deleted"); }
       catch(e){ console.error(e); toast("Couldn't delete — try again."); }
     };
@@ -1071,7 +1339,7 @@ function renderSectionsAdminList(){
 }
 
 /* ---------------------------------------------------------------------- */
-/* ADMIN — sizes (feature #6)                                             */
+/* ADMIN — sizes                                                           */
 /* ---------------------------------------------------------------------- */
 el("sizeDropzone").addEventListener("click", () => el("sizeImage").click());
 el("sizeImage").addEventListener("change", (e) => {
@@ -1133,7 +1401,7 @@ function renderSizesAdminList(){
     row.innerHTML = `
       ${s.referenceImageUrl ? `<img src="${s.referenceImageUrl}" alt="">` : `<div style="width:44px;height:44px;border:1px dashed var(--grey);flex:none;"></div>`}
       <span class="list-name">${escapeHtml(s.label)}</span>
-      <span class="list-count">${count} poster${count === 1 ? "" : "s"}</span>
+      <span class="list-count">${count} item${count === 1 ? "" : "s"}</span>
       <button class="link-danger" type="button">Delete</button>
     `;
     row.querySelector("button").onclick = async () => {
@@ -1146,7 +1414,7 @@ function renderSizesAdminList(){
 }
 
 /* ======================================================================= */
-/* ADMIN — tabs                                                            */
+/* ADMIN — tabs (+ unseen-orders badge, fix #5)                            */
 /* ======================================================================= */
 const ADMIN_TABS = {
   products: "adminProductsTab",
@@ -1154,6 +1422,7 @@ const ADMIN_TABS = {
   sizes: "adminSizesTab",
   orders: "adminOrdersTab",
   settings: "adminSettingsTab",
+  help: "adminHelpTab",
 };
 document.querySelectorAll(".admin-tab").forEach(tab => {
   tab.addEventListener("click", () => {
@@ -1161,8 +1430,21 @@ document.querySelectorAll(".admin-tab").forEach(tab => {
     tab.classList.add("active");
     Object.values(ADMIN_TABS).forEach(id => hide(el(id)));
     show(el(ADMIN_TABS[tab.dataset.tab]));
+    if (tab.dataset.tab === "orders") markOrdersSeen();
   });
 });
+
+async function markOrdersSeen(){
+  const unseen = lastOrdersSnapshot.filter(o => o.seenByAdmin !== true);
+  if (unseen.length === 0) return;
+  try{
+    const batch = db.batch();
+    unseen.forEach(o => batch.update(db.collection("orders").doc(o.id), { seenByAdmin: true }));
+    await batch.commit();
+  } catch(e){
+    console.error("markOrdersSeen", e);
+  }
+}
 
 /* ---------------------------------------------------------------------- */
 /* ADMIN — orders board                                                    */
@@ -1173,11 +1455,19 @@ function listenOrders(){
   ordersUnsub = db.collection("orders").orderBy("createdAt", "desc")
     .onSnapshot((snap) => {
       const orders = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      lastOrdersSnapshot = orders;
       renderOrdersBoard(orders);
+      renderOrdersBadge(orders);
     }, (err) => console.error("orders listener", err));
 }
 
-// Admin-facing labels (what YOU see on the board)
+function renderOrdersBadge(orders){
+  const unseenCount = orders.filter(o => o.seenByAdmin !== true).length;
+  const badge = el("ordersBadge");
+  badge.textContent = unseenCount;
+  badge.classList.toggle("hidden", unseenCount === 0);
+}
+
 const STATUS_LABEL = {
   awaiting_verification: "Received",
   paid: "Payment verified",
@@ -1197,14 +1487,15 @@ const BOARD_COLUMNS = [
   { key: "rejected", label: "Rejected" },
 ];
 
-// Customer-facing labels + reassurance messages (fix #2). No "check your
-// email" line — no email actually goes out yet, so this only shows what's
-// true: what they'll see right here on this page.
+// Customer-facing labels + messages (fix #2/#7). Rejected explicitly
+// mentions email because the admin has confirmed they manually send one
+// for rejections — every other status only promises what's actually true
+// (visible right here on this page).
 const CUSTOMER_STATUS = {
   awaiting_verification: { label: "Payment not verified yet", cls: "msg-awaiting", msg: "We haven't verified your payment yet — we check these regularly and will update this page once confirmed." },
   paid: { label: "Order confirmed", cls: "msg-paid", msg: "Order placed successfully! Your payment is verified and we're getting it ready." },
   fulfilled: { label: "Delivered", cls: "msg-fulfilled", msg: "This order has been delivered. Thanks for shopping with us!" },
-  rejected: { label: "Order rejected", cls: "msg-rejected", msg: "This order was rejected — we couldn't verify the payment. If you think that's a mistake, please get in touch with us directly." },
+  rejected: { label: "Order rejected", cls: "msg-rejected", msg: "Your order has been rejected. Check your email to know more." },
 };
 
 function renderOrdersBoard(orders){
@@ -1237,7 +1528,6 @@ function renderOrdersBoard(orders){
   });
 }
 
-// Shared order card, used by both the admin board and "My orders".
 function orderCard(o, opts){
   const adminActions = !!(opts && opts.adminActions);
   const card = document.createElement("div");
@@ -1250,11 +1540,11 @@ function orderCard(o, opts){
 
   card.innerHTML = `
     <div class="order-head">
-      <span>#${o.id.slice(0,6).toUpperCase()}${adminActions ? " · " + escapeHtml(o.userEmail || "") : ""}</span>
+      <span>#${o.id.slice(0,6).toUpperCase()}${adminActions ? " · " + escapeHtml(o.userEmail || "") : ""}${adminActions && o.seenByAdmin !== true ? ' <span class="tab-badge">new</span>' : ""}</span>
       <span class="status-pill ${pillClass}">${pillLabel}</span>
     </div>
     ${!adminActions ? `<div class="order-customer-msg ${cs.cls}">${escapeHtml(cs.msg)}</div>` : ""}
-    <div class="order-items">${escapeHtml(itemsStr)}${o.customerConfirmedPaid ? " · buyer marked as paid" : ""}</div>
+    <div class="order-items">${escapeHtml(itemsStr)}</div>
     ${s ? `<div class="order-shipping">${escapeHtml(s.name || "")}<br>${escapeHtml(s.phone || "")}<br>${escapeHtml(s.address || "")}<br>PIN ${escapeHtml(s.pincode || "")}</div>` : ""}
     <div class="order-total">${money(o.total)}</div>
     <div class="row-actions" id="actions-${o.id}"></div>
@@ -1353,5 +1643,64 @@ el("paymentSettingsForm").addEventListener("submit", async (e) => {
   } finally {
     btn.disabled = false;
     btn.textContent = "Save payment settings";
+  }
+});
+
+/* ---------------------------------------------------------------------- */
+/* ADMIN — help page (feature #4)                                          */
+/* ---------------------------------------------------------------------- */
+function addContactRow(label, value){
+  const wrap = el("contactsEditor");
+  const row = document.createElement("div");
+  row.className = "contact-edit-row";
+  row.innerHTML = `
+    <input type="text" placeholder="Label (e.g. WhatsApp)" class="contact-label-input" value="${escapeHtml(label || "")}">
+    <input type="text" placeholder="Value (phone, email, link...)" class="contact-value-input" value="${escapeHtml(value || "")}">
+    <button type="button" class="link-danger">Remove</button>
+  `;
+  row.querySelector("button").onclick = () => row.remove();
+  wrap.appendChild(row);
+}
+el("addContactRowBtn").onclick = () => addContactRow("", "");
+
+function collectContacts(){
+  return Array.from(el("contactsEditor").querySelectorAll(".contact-edit-row")).map(row => ({
+    label: row.querySelector(".contact-label-input").value.trim(),
+    value: row.querySelector(".contact-value-input").value.trim(),
+  })).filter(c => c.label || c.value);
+}
+
+async function loadHelpSettingsIntoAdminForm(){
+  try{
+    const doc = await db.collection("settings").doc("help").get();
+    const d = doc.exists ? doc.data() : {};
+    el("helpContent").value = d.content || "";
+    el("contactsEditor").innerHTML = "";
+    (d.contacts && d.contacts.length ? d.contacts : [{ label: "", value: "" }]).forEach(c => addContactRow(c.label, c.value));
+  } catch(e){
+    console.error("loadHelpSettingsIntoAdminForm", e);
+  }
+}
+
+el("helpSettingsForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errBox = el("helpError");
+  hide(errBox);
+  const btn = el("helpSaveBtn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try{
+    await db.collection("settings").doc("help").set({
+      content: el("helpContent").value,
+      contacts: collectContacts(),
+    }, { merge: true });
+    toast("Help page saved");
+  } catch(err){
+    console.error(err);
+    errBox.textContent = "Couldn't save — check your connection and try again.";
+    show(errBox);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save help page";
   }
 });
